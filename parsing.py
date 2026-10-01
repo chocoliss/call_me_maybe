@@ -2,11 +2,13 @@ from pathlib import Path
 from pydantic import BaseModel, TypeAdapter, ValidationError
 import json
 
+class Param(BaseModel):
+    name: dict[dict[str, str | int], dict[str, str | int]]
 
 class Parse(BaseModel):
     name: str
     description: str
-    parameters: dict
+    parameters: dict[str, dict[str,str | int]] | Param
     returns: dict
 
 adapter = TypeAdapter(list[Parse])
