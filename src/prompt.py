@@ -1,4 +1,4 @@
-from typing import List, Any,Dict
+from typing import List, Any
 import math
 
 
@@ -24,7 +24,7 @@ def function_description(prompt: str, data: List[str] | None) -> str:
 
 def choosing_function_gd(
         model: Any,
-        func_ids: Dict[str],
+        func_ids: dict,
         input_ids: List[int],
         generated_ids: List
         ) -> List[int]:
@@ -116,7 +116,7 @@ def score_of_function(
 def build_parameter_prompt(
         user_prompt: str,
         function_name: str,
-        parameters: Dict[str | Dict[str | int]] | Any
+        parameters: dict | Any
     ) -> str:
     text = (
         "Extract the arguments required by the selected function.\n"
@@ -138,7 +138,7 @@ def build_parameter_prompt(
 
 
 def get_valid_number_tokens(
-        parameters: Dict[str | Dict[str | int]] | Any | None,
+        parameters: dict | Any | None,
         vocabulary: str,
         model: Any,
         prompt: str

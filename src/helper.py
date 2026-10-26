@@ -1,4 +1,4 @@
-from typing import List, Any,Dict
+from typing import List, Any
 import json
 import re
 
@@ -71,17 +71,88 @@ def generate_json_number(
         generated_ids.append(next_token_id)
         number_text += token_texts[next_token_id]
 
-        print("Generated:", repr(number_text))
-        print("Expected stop:", repr(model.decode([stop_token_id])))
+        # print("Generated:", repr(number_text))
+        # print("Expected stop:", repr(model.decode([stop_token_id])))
 
     raise ValueError("Number exceeded maximum token limit")
 
-def  generate_json_string(
-                model,
-                context_ids,
-            ) -> list[int]:
-    print("ok")
-    return None
+
+
+def generate_json_string(
+    model: Any,
+    context_ids: list[int],
+    valid_string_ids: list[int],
+    max_tokens: int = 50,
+) -> list[int]:
+    """Generate a simple quoted JSON string with constrained decoding."""
+
+    quote_ids = model.encode('"')[0].tolist()
+
+    if len(quote_ids) != 1:
+        raise ValueError("Expected a single quote token")
+
+    quote_id = quote_ids[0]
+
+    # Python adds the opening quote
+    generated_ids = [quote_id]
+
+    for _ in range(max_tokens):
+        logits = model.get_logits_from_input_ids(
+            context_ids + generated_ids
+        )
+
+        # Qwen may generate text or close the string
+        allowed_ids = valid_string_ids + [quote_id]
+
+        next_id = max(
+            allowed_ids,
+            key=lambda token_id: logits[token_id]
+        )
+
+        if next_id == quote_id:
+            # The model has finished the string
+            generated_ids.append(quote_id)
+            return generated_ids
+
+        generated_ids.append(next_id)
+        print("Generated tokens:", generated_ids)
+        print("Generated text:", repr(model.decode(generated_ids)))
+        print("Expected closing token:", repr(model.decode([quote_id])))
+
+    raise ValueError("String exceeded maximum token limit")
+
+
+
+
+def get_valid_string_tokens(
+        model: Any,
+        vocab_size: int = 151936,
+    ) -> list[int]:
+        """Find tokens that can safely appear inside a basic JSON string."""
+
+        valid_ids = []
+
+        for token_id in range(vocab_size):
+            text = model.decode([token_id])
+
+            if not text:
+                continue
+
+            # Reject quotes, backslashes and control characters
+            if '"' in text or "\\" in text:
+                continue
+
+            if any(ord(char) < 32 for char in text):
+                continue
+
+            # Reject replacement characters and obvious special tokens
+            if "\ufffd" in text or text.startswith("<|"):
+                continue
+
+            valid_ids.append(token_id)
+
+        return valid_ids
+
 
 def get_valid_number_token(
         vocab_size: float,
@@ -96,38 +167,6 @@ def get_valid_number_token(
 
     return token_ids
 
-
-def generate_positive_integer(
-    model,
-    context_ids: list[int],
-    digit_ids: list[int],
-    stop_token_id: int,
-    max_digits: int = 20,
-) -> tuple[list[int], int]:
-    """Generate a positive integer followed by its delimiter."""
-    number_ids = []
-
-    for _ in range(max_digits):
-        logits = model.get_logits_from_input_ids(
-            context_ids + number_ids
-        )
-
-        allowed = digit_ids.copy()
-
-        if number_ids:
-            allowed.append(stop_token_id)
-
-        next_id = max(
-            allowed,
-            key=lambda token_id: logits[token_id]
-        )
-
-        if next_id == stop_token_id:
-            return number_ids, stop_token_id
-
-        number_ids.append(next_id)
-
-    raise ValueError("Number generation exceeded max_digits")
 
 
 
@@ -148,7 +187,7 @@ def get_number_tokens(model: Any) -> list[int]:
 
 def generate_parameters(
         model: Any,
-        parameter: Dict[str | Dict[str | int]] | Any | None,
+        parameter: dict | Any | None,
         user_prompt: str,
         definition: str,
         function: str,
@@ -156,8 +195,8 @@ def generate_parameters(
 
     parameter_prompt = (
         "Extract the input arguments for the selected function.\n"
-        "Do not calculate or execute the function.\n"
-        "Copy the numerical values from the user request.\n"
+        "Do not execute the function.\n"
+        "Preserve the original text of string arguments.\n"
         f"Function: {function}\n"
         f"Description: {definition.description}\n"
         f"Parameters: {json.dumps(parameter)}\n"
@@ -170,7 +209,9 @@ def generate_parameters(
         parameter_prompt
         )[0].tolist()
 
-    valid_ids = get_number_tokens(model)
+    number_ids = get_number_tokens(model)
+
+    string_ids = get_valid_string_tokens(model)
 
     generated_ids = [model.encode("{")[0].tolist()[0]]
 
@@ -198,28 +239,30 @@ def generate_parameters(
         else:
             stop_id = comma_id
 
-        parameter_type = str(parameter[key])
-        print(parameter_type)
-
-        if parameter_type in ['float', 'number', 'int', 'integer']:
-            number_a_ids = generate_json_number(
+        parameter_type = parameter[key]
+        parameters_ids = []
+        if parameter_type["type"] in ['float', 'number', 'integer']:
+            parameters_ids = generate_json_number(
                 model,
                 context_ids,
-                valid_ids,
+                number_ids,
                 stop_id,
             )
-        elif parameter_type in ['string', 'character', 'str']:
-            value = generate_json_string(
+        elif parameter_type["type"] in ['string', 'character']:
+            parameters_ids = generate_json_string(
                 model,
                 context_ids,
+                string_ids,
+                50,
             )
         else:
             raise ValueError(f"The type of {key} you wrote is not valid")
 
-        generated_ids.extend(number_a_ids)
+        
+        generated_ids.extend(parameters_ids)
 
 
-        print(f"{key} =", model.decode(number_a_ids))
+        print(f"{key} =", model.decode(parameters_ids))
 
 
     generated_ids.append(end_id)
