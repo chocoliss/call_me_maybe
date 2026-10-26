@@ -1,4 +1,5 @@
 from pydantic import BaseModel, TypeAdapter, ValidationError
+from typing import List, Any
 import json
 
 
@@ -9,6 +10,7 @@ class Parse(BaseModel):
     returns: dict
 
 def parse():
+    names :list[str | None] = []
     adapter = TypeAdapter(list[Parse])
 
     try:
@@ -23,21 +25,30 @@ def parse():
         return None
     else:
         try:
-            names = ['fn_add_numbers', 'fn_greet',
-                    'fn_reverse_string', 'fn_get_square_root',
-                    'fn_substitute_string_with_regex']
             for dicts in items:
-                for d in dicts:
-                    print(d)
-                    if d not in ['name', 'description', 'parameters', 'returns']:
+                for k, v in dicts:
+                    if k not in ['name', 'description', 'parameters', 'returns']:
                         raise ValueError("The keys in the dictionnary did not match."
                             "\nname, description,parameters,returns")
-                    if d == 'name':
-                        c: str = dicts[d][0]
+                    if k == 'name':
+                        c = v[0]
                         if c.isnumeric():
                             raise ValueError("The name of the function is not correct")
+                        names.append(v)
         except ValueError as e:
             print(f"Error : {e}")
         else:
             print("done")
-            return items
+            return items, names
+
+
+def prompts_callinng() -> List[str]:
+    prompts = list()
+    with open("data/input/function_calling_tests.json",'r') as f:
+        inputs: List[dict[setattr]] = json.load(f)
+    for dic in inputs:
+        for value in dic.values():
+            prompts.append(value)
+
+    return prompts
+

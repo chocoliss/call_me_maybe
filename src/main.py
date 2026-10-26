@@ -1,48 +1,58 @@
 import json
 from parsing import parse
 from llm_sdk import Small_LLM_Model
+from prompt import function_description, choosing_function_LSE
+from helper import generate_parameters
+from typing import Any, List, Dict
+
 def main():
-    data = parse()
+    data, fn_names = parse()
     if data == None:
         exit(1)
 
     model = Small_LLM_Model()
 
-    prompt = "The capital of France is"
-    input_ids = model.encode(prompt)[0].tolist()
+    user_prompt = "What is the sum of 1337.34 and 42?"
 
-    logits = model.get_logits_from_input_ids(input_ids)
+    llm_prompt = function_description(user_prompt, data)
 
-    # Candidate token IDs
-    candidate_ids = []
+    input_ids = model.encode(llm_prompt)[0].tolist()
 
-    for word in [" Paris", " London", " Berlin"]:
-        ids = model.encode(word)[0].tolist()
+    prefix_id = model.encode('{"name":"')[0].tolist()
 
-        print(ids)
+    function = choosing_function_LSE(model, fn_names, input_ids, prefix_id)
+    print(function)
 
-        if len(ids) == 1:
-            candidate_ids.append(ids[0])
-
-    if not candidate_ids:
-        raise ValueError("No single-token candidates found")
-
-    # Select the highest-scoring allowed token
-    next_token_id = max(
-        candidate_ids,
-        key=lambda token_id: logits[token_id]
+    generated_ids = (
+        prefix_id + 
+        model.encode(function)[0].tolist() +
+        model.encode('",')[0].tolist()
     )
+    # print(model.decode(generated_ids))
+    definition = next(
+        element
+        for element in data
+        if element.name == function
+        )
 
-    print(logits)
+    parameter = definition.parameters
+    print("Parameter:", parameter.keys(), parameter.values())
 
-    print(logits[next_token_id])
+    generated_param_ids = generate_parameters(model, parameter, user_prompt, definition, function)
 
-    print("Selected token:", model.decode([next_token_id]))
+    # generated_param_ids.append(model.encode("}")[0].tolist()[0])
 
-    path = model.get_path_to_vocab_file()
+    parameters_text = model.decode(generated_param_ids)
 
-    print(path)
+    parameters_result = json.loads(parameters_text)
 
+    final_result = {
+        "prompt": user_prompt,
+        "name": function,
+        "parameters": parameters_result
+    }
+
+    print(json.dumps(final_result, indent=2))
 
 
 if __name__ == "__main__":

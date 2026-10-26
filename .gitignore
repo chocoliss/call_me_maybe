@@ -2,3 +2,6 @@
 .venv/
 llm_sdk/
 pyproject.toml
+data/
+data
+llm_sdk
