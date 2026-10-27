@@ -2,20 +2,23 @@ import json
 from .parsing import parse, prompts_callinng
 from llm_sdk import Small_LLM_Model
 from .prompt import function_description, choosing_function_LSE
-from .helper import generate_parameters
+from .helper import (
+    generate_parameters, get_valid_string_tokens, preserve_literal_span
+)
 from pathlib import Path
 
 def main():
-    data, fn_names = parse()
-    if data == None:
-        exit(1)
+    parsed = parse()
+    if parsed is None:
+        raise SystemExit("Unable to load function definitions")
+    data, fn_names = parsed
 
     model = Small_LLM_Model()
 
     prompts = prompts_callinng()
+    string_ids = get_valid_string_tokens(model)  # Scan once, reuse for all prompts.
 
     results = []
-
 
     for user_prompt in prompts:
 
@@ -45,13 +48,37 @@ def main():
         parameter = definition.parameters
         # print("Parameter:", parameter.keys(), parameter.values())
 
-        generated_param_ids = generate_parameters(model, parameter, user_prompt, definition, function)
+        generated_param_ids = generate_parameters(
+            model, parameter, user_prompt, definition, function,
+            cached_string_ids=string_ids,
+        )
 
         # generated_param_ids.append(model.encode("}")[0].tolist()[0])
 
         parameters_text = model.decode(generated_param_ids)
 
         parameters_result = json.loads(parameters_text)
+
+        # Keep numeric Python types consistent with the declared schema.
+        for key, info in parameter.items():
+            expected_type = info["type"]
+            value = parameters_result[key]
+            if expected_type in ("number", "float"):
+                if type(value) not in (int, float):
+                    raise ValueError(f"{key} must be numeric")
+                parameters_result[key] = float(value)
+            elif expected_type == "integer":
+                if type(value) is not int:
+                    raise ValueError(f"{key} must be an integer")
+            elif expected_type in ("string", "character"):
+                if not isinstance(value, str):
+                    raise ValueError(f"{key} must be a string")
+                # Preserve verbatim user text when Qwen is already very close.
+                # Do not force changes to newly generated values like regexes.
+                if key not in ("regex",):
+                    parameters_result[key] = preserve_literal_span(
+                        value, user_prompt
+                    )
 
 # Verify required parameter names
         if set(parameters_result.keys()) != set(parameter.keys()):
@@ -86,4 +113,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(e)
+        exit(0)
+    exit(0)

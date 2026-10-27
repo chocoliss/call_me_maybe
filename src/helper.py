@@ -140,56 +140,111 @@ def generate_json_number(
 
 #     raise ValueError("String exceeded maximum token limit")
 
+def _string_piece_transition(
+    piece: str,
+    state: str,
+    delimiter: str,
+) -> tuple[str, bool, bool] | None:
+    """Validate a full decoded token inside a JSON string.
+
+    Returns (new_state, finished, delimiter_consumed) or None.
+    The state tracks whether a JSON escape sequence is in progress.
+    """
+    position = 0
+    while position < len(piece):
+        char = piece[position]
+
+        if state.startswith("u") and state[1:].isdigit():
+            remaining = int(state[1:])
+            if char not in "0123456789abcdefABCDEF":
+                return None
+            state = "normal" if remaining == 1 else f"u{remaining - 1}"
+        elif state == "escape":
+            if char in '\"\\/bfnrt':
+                state = "normal"
+            elif char == "u":
+                state = "u4"
+            else:
+                return None
+        elif char == "\\":
+            state = "escape"
+        elif char == '\"':
+            suffix = piece[position + 1:]
+            if suffix == "":
+                return ("normal", True, False)
+            if suffix == delimiter:
+                return ("normal", True, True)
+            return None
+        elif ord(char) < 32:
+            return None
+        position += 1
+    return (state, False, False)
+
+
 def generate_json_string(
-    model,
+    model: Any,
     context_ids: list[int],
     valid_string_ids: list[int],
     stop_id: int,
     max_tokens: int = 50,
 ) -> tuple[list[int], bool]:
-
+    """Constrained JSON string with escaped quotes/backslashes and combined ends."""
     quote_id = model.encode('"')[0].tolist()[0]
-    stop_text = model.decode([stop_id])
+    delimiter = model.decode([stop_id])
+    if delimiter not in (",", "}"):
+        raise ValueError("String delimiter must be ',' or '}'")
 
-    # A token such as '",' or '"}'
-    combined_text = '"' + stop_text
-    combined_ids = model.encode(combined_text)[0].tolist()
+    # Supply the punctuation/escaping tokens that the ordinary-text filter excludes.
+    syntax_texts = (
+        '"', '"' + delimiter,
+        "\\", "\\\\", '\\"', "\\/",
+        "\\n", "\\r", "\\t", "\\b", "\\f", "\\u",
+    )
+    syntax_pieces: dict[int, str] = {}
+    for piece in syntax_texts:
+        token_ids = model.encode(piece)[0].tolist()
+        if len(token_ids) == 1 and model.decode(token_ids) == piece:
+            syntax_pieces[token_ids[0]] = piece
 
-    combined_id = None
-
-    if (
-        len(combined_ids) == 1
-        and model.decode(combined_ids) == combined_text
-    ):
-        combined_id = combined_ids[0]
-
+    # The opening quote is written by Python, but the content is chosen by Qwen.
     generated_ids = [quote_id]
+    state = "normal"
+    special_candidates = list(syntax_pieces)
 
     for _ in range(max_tokens):
-        logits = model.get_logits_from_input_ids(
-            context_ids + generated_ids
+        logits = model.get_logits_from_input_ids(context_ids + generated_ids)
+        candidates: list[tuple[int, tuple[str, bool, bool]]] = []
+
+        # All ordinary-text tokens are valid when not inside an escape sequence.
+        if state == "normal":
+            candidates.extend(
+                (token_id, ("normal", False, False))
+                for token_id in valid_string_ids
+            )
+        else:
+            for token_id in valid_string_ids:
+                piece = model.decode([token_id])
+                result = _string_piece_transition(piece, state, delimiter)
+                if result is not None:
+                    candidates.append((token_id, result))
+
+        for token_id in special_candidates:
+            transition = _string_piece_transition(
+                syntax_pieces[token_id], state, delimiter
+            )
+            if transition is not None:
+                candidates.append((token_id, transition))
+
+        if not candidates:
+            raise ValueError("No valid token can continue the JSON string")
+
+        next_id, (next_state, finished, consumed) = max(
+            candidates, key=lambda item: logits[item[0]]
         )
-
-        allowed_ids = valid_string_ids + [quote_id]
-
-        # Allow closing quote + delimiter as one token
-        if combined_id is not None:
-            allowed_ids.append(combined_id)
-
-        next_id = max(
-            allowed_ids,
-            key=lambda i: logits[i]
-        )
-
-        if next_id == quote_id:
-            generated_ids.append(quote_id)
-            return generated_ids, False
-
-        if next_id == combined_id:
-            generated_ids.append(combined_id)
-            return generated_ids, True
-
         generated_ids.append(next_id)
+        if finished:
+            return generated_ids, consumed
+        state = next_state
 
     raise ValueError("String exceeded maximum token limit")
 
@@ -255,17 +310,56 @@ def get_number_tokens(model: Any) -> list[int]:
     return result
 
 
+def preserve_literal_span(
+    value: str, user_prompt: str, threshold: float = 0.92
+) -> str:
+    """Restore original characters for a high-confidence LLM-proposed span.
+
+    This is conservative source-copy postprocessing, not regex argument extraction.
+    A genuinely generated/transformed value should remain unchanged.
+    """
+    from difflib import SequenceMatcher
+
+    candidate = value.strip()
+    if not candidate or len(candidate) < 2:
+        return value
+    if candidate in user_prompt:
+        return candidate
+
+    normalized = candidate.casefold().replace("\\", "/")
+    max_difference = max(3, int(len(candidate) * 0.2))
+    best_score = 0.0
+    best_span = None
+    for start in range(len(user_prompt)):
+        minimum = max(start + 1, start + len(candidate) - max_difference)
+        maximum = min(len(user_prompt), start + len(candidate) + max_difference)
+        for end in range(minimum, maximum + 1):
+            span = user_prompt[start:end]
+            if not span or span[0].isspace() or span[-1].isspace():
+                continue
+            comparison = span.casefold().replace("\\", "/")
+            score = SequenceMatcher(None, normalized, comparison).ratio()
+            if score > best_score:
+                best_score, best_span = score, span
+
+    if best_score >= threshold and best_span is not None:
+        return best_span
+    return value
+
 def generate_parameters(
         model: Any,
         parameter: dict | Any | None,
         user_prompt: str,
         definition: str,
         function: str,
-        ) -> str:
+        cached_string_ids: list[int] | None = None,
+        ) -> list[int]:
 
     parameter_prompt = (
         "Extract the input arguments for the selected function.\n"
         "Do not execute the function.\n"
+        "For literal strings, preserve exact punctuation, case, and slashes.\n"
+        "Escape internal quotation marks and backslashes in JSON.\n"
         f"Function: {function}\n"
         f"Description: {definition.description}\n"
         f"Parameters: {json.dumps(parameter)}\n"
@@ -298,7 +392,11 @@ def generate_parameters(
 
     number_ids = get_number_tokens(model)
 
-    string_ids = get_valid_string_tokens(model)
+    string_ids = (
+        cached_string_ids
+        if cached_string_ids is not None
+        else get_valid_string_tokens(model)
+    )
 
     generated_ids = [model.encode("{")[0].tolist()[0]]
 

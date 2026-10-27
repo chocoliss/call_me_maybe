@@ -1,17 +1,16 @@
 PYTHON := uv run python
-MAIN := src/main.py
+MAIN := src
 
 .PHONY: install run debug clean lint lint-strict
 
-
-install: 
-	$(PYTHON) -m pip install -r requirements.txt
+install:
+	uv sync
 
 run:
-	$(PYTHON) $(MAIN)
+	uv run python -m src
 
 debug:
-	$(PYTHON) -m pdb $(MAIN)
+	uv run python -m pdb -m src
 
 clean:
 	find . -type f -name '*.py[co]' -delete
@@ -20,7 +19,7 @@ clean:
 	find . -type d -name '.pytest_cache' -prune -exec rm -rf {} +
 
 lint:
-	flake8 .
+	flake8 . --exclude=llm_sdk,moulinette
 	mypy . --warn-return-any --warn-unused-ignores \
 		--ignore-missing-imports --disallow-untyped-defs \
 		--check-untyped-defs
