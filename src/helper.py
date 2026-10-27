@@ -1,6 +1,7 @@
 from typing import List, Any
 import json
 import re
+from heapq import nlargest
 
 
 COMPLETE_NUMBER = re.compile(
@@ -78,22 +79,90 @@ def generate_json_number(
 
 
 
+# def generate_json_string(
+#     model: Any,
+#     context_ids: list[int],
+#     valid_string_ids: list[int],
+#     max_tokens: int = 50,
+# ) -> list[int]:
+#     """Generate a simple quoted JSON string with constrained decoding."""
+
+#     quote_ids = model.encode('"')[0].tolist()
+
+#     if len(quote_ids) != 1:
+#         raise ValueError("Expected a single quote token")
+
+#     quote_id = quote_ids[0]
+
+#     # Python adds the opening quote
+#     generated_ids = [quote_id]
+
+#     for _ in range(max_tokens):
+#         logits = model.get_logits_from_input_ids(
+#             context_ids + generated_ids
+#         )
+
+#         if model.decode(generated_ids) == '"cat':
+#             top_ids = nlargest(
+#                 15,
+#                 range(len(logits)),
+#                 key=lambda i: logits[i]
+#             )
+
+#             print("Top tokens after cat:")
+
+#             for token_id in top_ids:
+#                 print(
+#                     repr(model.decode([token_id])),
+#                     round(logits[token_id], 2),
+#                     "allowed:", token_id in valid_string_ids
+#                             or token_id == quote_id
+#                 )
+
+
+#         # Qwen may generate text or close the string
+#         allowed_ids = valid_string_ids + [quote_id]
+
+#         next_id = max(
+#             allowed_ids,
+#             key=lambda token_id: logits[token_id]
+#         )
+
+#         if next_id == quote_id:
+#             # The model has finished the string
+#             generated_ids.append(quote_id)
+#             return generated_ids
+
+#         generated_ids.append(next_id)
+#         print("Generated tokens:", generated_ids)
+#         print("Generated text:", repr(model.decode(generated_ids)))
+#         print("Expected closing token:", repr(model.decode([quote_id])))
+
+#     raise ValueError("String exceeded maximum token limit")
+
 def generate_json_string(
-    model: Any,
+    model,
     context_ids: list[int],
     valid_string_ids: list[int],
+    stop_id: int,
     max_tokens: int = 50,
-) -> list[int]:
-    """Generate a simple quoted JSON string with constrained decoding."""
+) -> tuple[list[int], bool]:
 
-    quote_ids = model.encode('"')[0].tolist()
+    quote_id = model.encode('"')[0].tolist()[0]
+    stop_text = model.decode([stop_id])
 
-    if len(quote_ids) != 1:
-        raise ValueError("Expected a single quote token")
+    # A token such as '",' or '"}'
+    combined_text = '"' + stop_text
+    combined_ids = model.encode(combined_text)[0].tolist()
 
-    quote_id = quote_ids[0]
+    combined_id = None
 
-    # Python adds the opening quote
+    if (
+        len(combined_ids) == 1
+        and model.decode(combined_ids) == combined_text
+    ):
+        combined_id = combined_ids[0]
+
     generated_ids = [quote_id]
 
     for _ in range(max_tokens):
@@ -101,27 +170,28 @@ def generate_json_string(
             context_ids + generated_ids
         )
 
-        # Qwen may generate text or close the string
         allowed_ids = valid_string_ids + [quote_id]
+
+        # Allow closing quote + delimiter as one token
+        if combined_id is not None:
+            allowed_ids.append(combined_id)
 
         next_id = max(
             allowed_ids,
-            key=lambda token_id: logits[token_id]
+            key=lambda i: logits[i]
         )
 
         if next_id == quote_id:
-            # The model has finished the string
             generated_ids.append(quote_id)
-            return generated_ids
+            return generated_ids, False
+
+        if next_id == combined_id:
+            generated_ids.append(combined_id)
+            return generated_ids, True
 
         generated_ids.append(next_id)
-        print("Generated tokens:", generated_ids)
-        print("Generated text:", repr(model.decode(generated_ids)))
-        print("Expected closing token:", repr(model.decode([quote_id])))
 
     raise ValueError("String exceeded maximum token limit")
-
-
 
 
 def get_valid_string_tokens(
@@ -196,18 +266,35 @@ def generate_parameters(
     parameter_prompt = (
         "Extract the input arguments for the selected function.\n"
         "Do not execute the function.\n"
-        "Preserve the original text of string arguments.\n"
         f"Function: {function}\n"
         f"Description: {definition.description}\n"
         f"Parameters: {json.dumps(parameter)}\n"
         f"User request: {user_prompt}\n"
+    )
+
+    if function == "fn_substitute_string_with_regex":
+        parameter_prompt += (
+            "Parameter meanings:\n"
+            "- source_string: the original complete text.\n"
+            "- regex: the pattern for the text to replace.\n"
+            "For literal word replacements, use the word itself.\n"
+            "Do not join occurrences using .* or repeat the pattern.\n"
+            "- replacement: the replacement text.\n"
+        )
+
+    parameter_prompt += (
         "Return only the JSON arguments.\n"
         "Arguments: "
     )
 
-    parameter_input_ids = model.encode(
-        parameter_prompt
-        )[0].tolist()
+    parameter_input_ids = model.encode(parameter_prompt)[0].tolist()
+
+
+    # if function == "fn_substitute_string_with_regex":
+    #     parameter_input_ids.extend(model.encode(regex_prompt)[0].tolist())
+    # else:
+    #     parameter_input_ids.extend(model.encode("Argumrents:")[0].tolist())
+
 
     number_ids = get_number_tokens(model)
 
@@ -221,10 +308,14 @@ def generate_parameters(
 
     keys = list(parameter.keys())
 
+    delimiter_consumed = False
+
     for length in range(len(parameter)):
 
-        if length >= 1:
+        if length >= 1 and not delimiter_consumed:
             generated_ids.append(comma_id)
+
+        delimiter_consumed = False
 
         key = keys[length]
 
@@ -248,11 +339,12 @@ def generate_parameters(
                 number_ids,
                 stop_id,
             )
-        elif parameter_type["type"] in ['string', 'character']:
-            parameters_ids = generate_json_string(
+        elif parameter_type["type"] in ["string", "character"]:
+            parameters_ids, delimiter_consumed = generate_json_string(
                 model,
                 context_ids,
                 string_ids,
+                stop_id,
                 50,
             )
         else:
@@ -262,9 +354,10 @@ def generate_parameters(
         generated_ids.extend(parameters_ids)
 
 
-        print(f"{key} =", model.decode(parameters_ids))
+        # print(f"{key} =", model.decode(parameters_ids))
 
 
-    generated_ids.append(end_id)
+    if not delimiter_consumed:
+        generated_ids.append(end_id)
 
     return generated_ids
