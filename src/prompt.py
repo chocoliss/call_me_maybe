@@ -1,42 +1,44 @@
-from typing import List, Any
 import math
+from typing import Any, List
+
+from .parsing import Parse, ParameterSchema
 
 
-def function_description(prompt: str, data: List[str] | None) -> str:
+def function_description(prompt: str, data: list[Parse]) -> str:
     llm_prompt = (
-                "You are a function calling assistant.\n"
-                "Select the function that best matches the user's request.\n\n"
-                "Available functions:\n"
-            )
+        "You are a function calling assistant.\n"
+        "Select the function that best matches the user's request.\n\n"
+        "Available functions:\n"
+    )
 
     for func in data:
         llm_prompt += (
-        f"{func.name}: {func.description}\n"
+            f"{func.name}: {func.description}\n"
         )
 
     llm_prompt += (
         f"\nUser request: {prompt}\n"
         "Return the matching function call as JSON.\n"
         "Function call: "
-        )
+    )
 
     return llm_prompt
 
+
 def choosing_function_gd(
-        model: Any,
-        func_ids: dict,
-        input_ids: List[int],
-        generated_ids: List
-        ) -> List[int]:
-    selected_func_ids = []
+    model: Any,
+    func_ids: dict[str, list[int]],
+    input_ids: List[int],
+    generated_ids: List[int],
+) -> List[int]:
+    selected_func_ids: list[int] = []
 
     while True:
-
         if any(
-                selected_func_ids == ids
-                for ids in func_ids.values()
-            ):
-                break
+            selected_func_ids == ids
+            for ids in func_ids.values()
+        ):
+            break
 
         candidates = []
 
@@ -71,58 +73,60 @@ def choosing_function_gd(
 
     return selected_func_ids
 
+
 def choosing_function_LSE(
-        model: Any,
-        fn_names: List[str],
-        input_ids: List[str],
-        prefix_id: List[str]
-        ) -> List[int]:
-    function_score = {}
+    model: Any,
+    fn_names: List[str],
+    input_ids: List[int],
+    prefix_id: List[int],
+) -> str:
+    function_score: dict[str, float] = {}
 
     for func in fn_names:
         func_ids = model.encode(func)[0].tolist()
-
         context_ids = input_ids + prefix_id
-
-        score = score_of_function(model,context_ids, func_ids)
-
+        score = score_of_function(model, context_ids, func_ids)
         function_score[func] = score
 
-    return max(function_score, key=function_score.get)
+    if not function_score:
+        raise ValueError("No functions available to choose from")
+    return max(function_score, key=lambda name: function_score[name])
+
 
 def score_of_function(
-        model: Any,
-        context_ids: List[int],
-        candidates_ids: List[int]
-        ) -> float:
+    model: Any,
+    context_ids: List[int],
+    candidates_ids: List[int],
+) -> float:
     score = 0.0
     current_ids = context_ids.copy()
+
     for token in candidates_ids:
         logits = model.get_logits_from_input_ids(current_ids)
-
         max_logit = max(logits)
 
-        log_sum_exp =  max_logit + math.log(sum(math.exp(x - max_logit) for x in logits)) 
+        log_sum_exp = max_logit + math.log(
+            sum(math.exp(x - max_logit) for x in logits)
+        )
 
-        token_log_prob =logits[token] - log_sum_exp 
-
+        token_log_prob = logits[token] - log_sum_exp
         score += token_log_prob
-        # print(f"for token :{repr(model.decode([token]))}, the score is :{score}")
-
         current_ids.append(token)
 
     return score
 
+
 def build_parameter_prompt(
-        user_prompt: str,
-        function_name: str,
-        parameters: dict | Any
-    ) -> str:
+    user_prompt: str,
+    function_name: str,
+    parameters: ParameterSchema,
+) -> str:
     text = (
         "Extract the arguments required by the selected function.\n"
         f"Function: {function_name}\n"
         "Parameters:\n"
     )
+
     for name, info in parameters.items():
         text += f"- {name}: {info['type']}\n"
 
@@ -135,20 +139,16 @@ def build_parameter_prompt(
     return text
 
 
-
-
 def get_valid_number_tokens(
-        parameters: dict | Any | None,
-        vocabulary: str,
-        model: Any,
-        prompt: str
-        ) -> list[int]:
+    parameters: ParameterSchema,
+    vocabulary: str,
+    model: Any,
+    prompt: str,
+) -> list[int]:
     prmpt = (
         "Extract the arguments required by the selected function.\n"
     )
     prmpt += f"Select the {len(parameters)} parameter "
-    parameter = model.encode(prmpt)[0].tolist()
-    output = model.decode([parameter])
+    parameter: list[int] = model.encode(prmpt)[0].tolist()
 
     return parameter
-

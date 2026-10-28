@@ -1,8 +1,8 @@
-from typing import List, Any
 import json
 import re
-from heapq import nlargest
+from typing import Any
 
+from .parsing import Parse, ParameterSchema
 
 COMPLETE_NUMBER = re.compile(
     r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\Z"
@@ -11,6 +11,7 @@ COMPLETE_NUMBER = re.compile(
 NUMBER_PREFIX = re.compile(
     r"-?(?:0|[1-9][0-9]*)?(?:\.[0-9]*)?\Z"
 )
+
 
 def generate_json_number(
     model: Any,
@@ -78,68 +79,6 @@ def generate_json_number(
     raise ValueError("Number exceeded maximum token limit")
 
 
-
-# def generate_json_string(
-#     model: Any,
-#     context_ids: list[int],
-#     valid_string_ids: list[int],
-#     max_tokens: int = 50,
-# ) -> list[int]:
-#     """Generate a simple quoted JSON string with constrained decoding."""
-
-#     quote_ids = model.encode('"')[0].tolist()
-
-#     if len(quote_ids) != 1:
-#         raise ValueError("Expected a single quote token")
-
-#     quote_id = quote_ids[0]
-
-#     # Python adds the opening quote
-#     generated_ids = [quote_id]
-
-#     for _ in range(max_tokens):
-#         logits = model.get_logits_from_input_ids(
-#             context_ids + generated_ids
-#         )
-
-#         if model.decode(generated_ids) == '"cat':
-#             top_ids = nlargest(
-#                 15,
-#                 range(len(logits)),
-#                 key=lambda i: logits[i]
-#             )
-
-#             print("Top tokens after cat:")
-
-#             for token_id in top_ids:
-#                 print(
-#                     repr(model.decode([token_id])),
-#                     round(logits[token_id], 2),
-#                     "allowed:", token_id in valid_string_ids
-#                             or token_id == quote_id
-#                 )
-
-
-#         # Qwen may generate text or close the string
-#         allowed_ids = valid_string_ids + [quote_id]
-
-#         next_id = max(
-#             allowed_ids,
-#             key=lambda token_id: logits[token_id]
-#         )
-
-#         if next_id == quote_id:
-#             # The model has finished the string
-#             generated_ids.append(quote_id)
-#             return generated_ids
-
-#         generated_ids.append(next_id)
-#         print("Generated tokens:", generated_ids)
-#         print("Generated text:", repr(model.decode(generated_ids)))
-#         print("Expected closing token:", repr(model.decode([quote_id])))
-
-#     raise ValueError("String exceeded maximum token limit")
-
 def _string_piece_transition(
     piece: str,
     state: str,
@@ -188,13 +127,13 @@ def generate_json_string(
     stop_id: int,
     max_tokens: int = 50,
 ) -> tuple[list[int], bool]:
-    """Constrained JSON string with escaped quotes/backslashes and combined ends."""
+    """Generate a JSON string with escaped text and combined endings."""
     quote_id = model.encode('"')[0].tolist()[0]
     delimiter = model.decode([stop_id])
     if delimiter not in (",", "}"):
         raise ValueError("String delimiter must be ',' or '}'")
 
-    # Supply the punctuation/escaping tokens that the ordinary-text filter excludes.
+    # Supply punctuation and escape tokens excluded by the text filter.
     syntax_texts = (
         '"', '"' + delimiter,
         "\\", "\\\\", '\\"', "\\/",
@@ -206,7 +145,7 @@ def generate_json_string(
         if len(token_ids) == 1 and model.decode(token_ids) == piece:
             syntax_pieces[token_ids[0]] = piece
 
-    # The opening quote is written by Python, but the content is chosen by Qwen.
+    # Python adds the opening quote; Qwen chooses the contents.
     generated_ids = [quote_id]
     state = "normal"
     special_candidates = list(syntax_pieces)
@@ -215,7 +154,7 @@ def generate_json_string(
         logits = model.get_logits_from_input_ids(context_ids + generated_ids)
         candidates: list[tuple[int, tuple[str, bool, bool]]] = []
 
-        # All ordinary-text tokens are valid when not inside an escape sequence.
+        # Allow ordinary text outside an escape sequence.
         if state == "normal":
             candidates.extend(
                 (token_id, ("normal", False, False))
@@ -250,49 +189,47 @@ def generate_json_string(
 
 
 def get_valid_string_tokens(
-        model: Any,
-        vocab_size: int = 151936,
-    ) -> list[int]:
-        """Find tokens that can safely appear inside a basic JSON string."""
+    model: Any,
+    vocab_size: int = 151936,
+) -> list[int]:
+    """Find tokens that can safely appear inside a basic JSON string."""
 
-        valid_ids = []
+    valid_ids = []
 
-        for token_id in range(vocab_size):
-            text = model.decode([token_id])
+    for token_id in range(vocab_size):
+        text = model.decode([token_id])
 
-            if not text:
-                continue
+        if not text:
+            continue
 
-            # Reject quotes, backslashes and control characters
-            if '"' in text or "\\" in text:
-                continue
+        # Reject quotes, backslashes and control characters
+        if '"' in text or "\\" in text:
+            continue
 
-            if any(ord(char) < 32 for char in text):
-                continue
+        if any(ord(char) < 32 for char in text):
+            continue
 
-            # Reject replacement characters and obvious special tokens
-            if "\ufffd" in text or text.startswith("<|"):
-                continue
+        # Reject replacement characters and obvious special tokens
+        if "\ufffd" in text or text.startswith("<|"):
+            continue
 
-            valid_ids.append(token_id)
+        valid_ids.append(token_id)
 
-        return valid_ids
+    return valid_ids
 
 
 def get_valid_number_token(
-        vocab_size: float,
+        vocab_size: int,
         model: Any
-) -> List[float]:
-    token_ids = []
+) -> list[int]:
+    token_ids: list[int] = []
     for token_id in range(vocab_size):
-        token_text = model.decode(token_id)
+        token_text = model.decode([token_id])
 
         if token_text.isdigit():
             token_ids.append(token_id)
 
     return token_ids
-
-
 
 
 def get_number_tokens(model: Any) -> list[int]:
@@ -315,7 +252,7 @@ def preserve_literal_span(
 ) -> str:
     """Restore original characters for a high-confidence LLM-proposed span.
 
-    This is conservative source-copy postprocessing, not regex argument extraction.
+    This preserves likely copied spans; it does not extract regex arguments.
     A genuinely generated/transformed value should remain unchanged.
     """
     from difflib import SequenceMatcher
@@ -332,7 +269,9 @@ def preserve_literal_span(
     best_span = None
     for start in range(len(user_prompt)):
         minimum = max(start + 1, start + len(candidate) - max_difference)
-        maximum = min(len(user_prompt), start + len(candidate) + max_difference)
+        maximum = min(
+            len(user_prompt), start + len(candidate) + max_difference
+        )
         for end in range(minimum, maximum + 1):
             span = user_prompt[start:end]
             if not span or span[0].isspace() or span[-1].isspace():
@@ -346,14 +285,15 @@ def preserve_literal_span(
         return best_span
     return value
 
+
 def generate_parameters(
-        model: Any,
-        parameter: dict | Any | None,
-        user_prompt: str,
-        definition: str,
-        function: str,
-        cached_string_ids: list[int] | None = None,
-        ) -> list[int]:
+    model: Any,
+    parameter: ParameterSchema,
+    user_prompt: str,
+    definition: Parse,
+    function: str,
+    cached_string_ids: list[int] | None = None,
+) -> list[int]:
 
     parameter_prompt = (
         "Extract the input arguments for the selected function.\n"
@@ -382,13 +322,6 @@ def generate_parameters(
     )
 
     parameter_input_ids = model.encode(parameter_prompt)[0].tolist()
-
-
-    # if function == "fn_substitute_string_with_regex":
-    #     parameter_input_ids.extend(model.encode(regex_prompt)[0].tolist())
-    # else:
-    #     parameter_input_ids.extend(model.encode("Argumrents:")[0].tolist())
-
 
     number_ids = get_number_tokens(model)
 
@@ -430,7 +363,7 @@ def generate_parameters(
 
         parameter_type = parameter[key]
         parameters_ids = []
-        if parameter_type["type"] in ['float', 'number', 'integer']:
+        if parameter_type["type"] in ["float", "number", "integer"]:
             parameters_ids = generate_json_number(
                 model,
                 context_ids,
@@ -448,12 +381,9 @@ def generate_parameters(
         else:
             raise ValueError(f"The type of {key} you wrote is not valid")
 
-        
         generated_ids.extend(parameters_ids)
 
-
         # print(f"{key} =", model.decode(parameters_ids))
-
 
     if not delimiter_consumed:
         generated_ids.append(end_id)

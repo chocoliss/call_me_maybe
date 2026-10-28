@@ -20,6 +20,6 @@ clean:
 
 lint:
 	flake8 . --exclude=llm_sdk,moulinette
-	mypy . --warn-return-any --warn-unused-ignores \
+	uv run mypy src --warn-return-any --warn-unused-ignores \
 		--ignore-missing-imports --disallow-untyped-defs \
 		--check-untyped-defs
